@@ -133,6 +133,7 @@ Możemy zaobserwować, iż 45694 rekordów to duplikaty. Pojawiają się one wew
 ```{r handle-duplicate-values}
 w_duplicates <- unique(no_x[, 1:15])
 w_duplicates <- w_duplicates %>% 
+  ungroup %>%
   mutate(X = seq_len(n())) %>% 
   select(X, everything())
 ```
