@@ -9,14 +9,17 @@ output:
     theme: cosmo
     toc: yes
     toc_float: true
-    df_print: paged
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# Problem
+# Cel
+Celem projektu jest określenie jakie mogą być główne przyczyny stopniowego zmniejszania się długości śledzi oceanicznych wyławianych w Europie.
+
+Zbiór danych zostanie wczytany z pliku CSV, następnie musi zostać poddany wstępnemu oczyszczaniu.
+# Opis zbioru danych
 Analiza dotyczy zbióru danych na temat połowu śledzia oceanicznego w Europie. Do analizy zebrano pomiary śledzi i warunków w jakich żyją z ostatnich 60 lat. Dane były pobierane z połowów komercyjnych jednostek. W ramach połowu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi.
 
 Poniżej znajdują się szczegółowe opisy konkretnych atrybutów:
@@ -58,15 +61,20 @@ library(dplyr)
 set.seed(23)
 ```
 
-# Operacje na danych
-
+# Oczyszczenie danych
 ## Wczytanie danych z pliku CSV
 ```{r load-data}
 raw_data <- read.csv(file= "sledzie.csv", header= TRUE, sep= ",", na.strings= "?")
 ```
 
-## Oczyszczenie danych
-Podstawowe oczyszczenie danych rozpoczynam od zmiany klasy kolumny _xmonth_ z ciągłej na kategoryczną, gdyż w ten sposób powinniśmy traktować miesiąc. Co więcej zaokrąglam wartość totaln, która jest całkowitą liczbą połowu. 
+## Podstawowa analiza arybutów
+```{r short-summary}
+str(raw_data)
+```
+Zbiór zawiera 52582 rekordów rozmieszczonych w 16 kolumnach (z czego jedna jest kolumną porządkową).
+
+## Zmiana kolumn
+Zmienna _xmonth_, która reprezentuje miesiąc połowu powinna zostać zamieniona z ciągłej na kategoryczną, by nie traktować jej jako liczbę. Zmienna _totaln_, która reprezentuje łączną liczbę ryb złowionych, powinna zostać zmieniona na całkowitą.
 
 ```{r upgrade-data}
 raw_data <- raw_data %>% 
@@ -75,15 +83,24 @@ raw_data <- raw_data %>%
 
 ## Problem pustych danych
 ```{r missing-values-count}
-apply(raw_data, 2, function(x){sum(is.na(x))})
+#Puste dane liczbowo na kolumnę
+apply(raw_data, 2, function(x){ sum(is.na(x)) })
 
+#Puste dane procentowo na kolumnę
 apply(raw_data, 2, function(x){ sum(is.na(x)) / length(x) })
 ```
 
-Cały zbiór danych to prawie 53 tysięcy wieszy, ponad 10 tysięcy z nich posiada brakującą wartość w przynajmniej jednej z kolumn. Usuwając te wierszy, pozbylibyśmy się niemal 20% rekordów, co nawet przy tak dużym zbiorze może być znaczące.
+Zbiór zawiera również wartości puste - te pojawiają się głównie w kolumnach z informacją o dostępności planktonu oraz temperaturze przy powierzchni wody.
 
 ```{r missing-values-graph, warning= FALSE, message= FALSE}
-aggr(raw_data, plot= TRUE, col= c('white', 'black'), numbers= TRUE, prop= FALSE, bars= FALSE, labels= names(raw_data), cex.axis= 0.8, ylab=c("Histogram of missing data","Pattern"))
+aggr(raw_data, plot= TRUE, 
+     col= c('#fa9fb5', '#2b8cbe'), 
+     numbers= TRUE, 
+     prop= FALSE, 
+     bars= FALSE, 
+     labels= names(raw_data), 
+     cex.axis= 0.8, 
+     ylab=c("Histogram brakujących danych","Wzorzec"))
 ```
 
 Jak zobrazowano na wykresie powyżej, rozkład wartości pustych w kolumnach:
@@ -96,13 +113,14 @@ Jak zobrazowano na wykresie powyżej, rozkład wartości pustych w kolumnach:
 * lcop2	- dostępność planktonu - skupisko widłonogów gat. 2
 * sst - temperatura przy powierzchni wody	stopnie °C
 
-```{r handle-missing-values}
-data <- raw_data %>% 
-  fill(length:nao) %>% 
-  fill(length:nao, .direction = "up")
-```
+Usuwając wiersze z wartością NA, utracilibyśby stosunkowo dużo danych - lepszym pomysłem jest zastąpienie wartości brakującej średnią z konkretnego połowu. Bazując na fakcie, iż kolumny totaln, xmonth, nao definiują konkretny połów oraz nie zawierają one żadnych wartości pustych, posłużą one do grupowania. Dane zostały zgrupowane względem połowów, a następnie wartości puste zostały zamienione na średnią z tych połowów.
 
-Bazując na fakcie, iż dane były zbierane przez 60 lat oraz na tym, iż są one ułożone chronologicznie, nie powinniśmy zastępować wartości pustych średnią czy medianą z całej kolumny. Taka zamiana mogłaby powodować utratę ważnych informacji, dlatego wartości brakujące zostały uzupełnione porzednikiem, bądź następnikiem. Jeśli poprzednik też był wartością pustą, był zastępowany następnikiem.
+```{r handle-missing-values}
+data <- raw_data %>%
+  group_by(totaln, xmonth, nao) %>%
+  mutate_each(funs(replace(., which(is.na(.)),
+                                mean(., na.rm=TRUE))))
+```
 
 ## Problem duplikatów
 ```{r duplicates}
@@ -110,24 +128,22 @@ no_x <- data %>% select(-X)
 sum(duplicated(no_x))
 ```
 
-Przyglądając się danym możemy zauważyć sporo duplikatów, po sprawdzeniu na jaw wychodzi ponad 5 tysięcy takich rekordów. Jak zaobserowałem duplikaty pojawiają się najczęściej w jednym połowie, stąd pomysł aby usunąć zbędne informacje.
+Możemy zaobserwować, iż 45694 rekordów to duplikaty. Pojawiają się one wewnątrz jednego połowu, dlatego usunięcie ich nie wpłynie negatywnie, ani nie sfałszuje danych. Dla uproszczenia grafów oraz dalszych obliczeń, wszystkie duplikaty zostały usunięte, tym samym zbiór danych uszczuplił się do 6888 rekordów.
 
 ```{r handle-duplicate-values}
 w_duplicates <- unique(no_x[, 1:15])
-w_duplicates <- w_duplicates %>% mutate(X = seq_len(n())) %>% select(X, everything())
+w_duplicates <- w_duplicates %>% 
+  mutate(X = seq_len(n())) %>% 
+  select(X, everything())
 ```
 
 # Statystyki zbioru danych
-## Rozmiar danych
-```{r data-size}
-dim(w_duplicates)
-```
-
 ## Podstawowa analiza arybutów
-```{r short-summary}
+```{r clean-summary}
 str(w_duplicates)
 ```
 
+Zbiór danych po oczyszczaniu zmniejszył się do 6888 wierszy, liczba kolumn pozostała niezmieniona i wynosi 16.
 ## Analiza arybutów
 ```{r full-summary}
 knitr::kable(summary(w_duplicates))
@@ -135,15 +151,24 @@ knitr::kable(summary(w_duplicates))
 
 ## Rozklad wartosci
 ```{r variable-distribution, warning= FALSE, message= FALSE}
-data_dist <- w_duplicates %>% select(-X) %>% melt
-ggplot(data_dist) + 
-  stat_density(aes(x=value, y=..scaled..,color=variable), position="dodge", geom="line")
+data_dist <- w_duplicates %>% 
+  select(-X) %>% 
+  melt
+
+ggplot(data_dist, aes(x= value)) + 
+  geom_density(fill= "#2b8cbe") + 
+  facet_wrap(~variable, scales= "free") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
+
+Zmienne, poza _length_, nie mają rozkładu normalnego.
 
 # Korelacja zmiennych
 ```{r correlation}
-heatmaply(hetcor(w_duplicates))
+heatmaply(hetcor(as.data.frame(w_duplicates)), k_col = 2, k_row = 3)
 ```
+
+Z powodu różnych klas kolumn, np. xmonth jest zmienną kategoryczną, length ciągłą a X porządkową. Została wyliczona heterogeniczna macierz korelacji, metodą _hetcor_ z biblioteki _ploycor_.
 
 # Wykres po czasie
 ```{r interactive-plot}
@@ -155,12 +180,16 @@ p <- ggplot(w_duplicates, aes(x= X, y= length)) +
 ggplotly(p)
 ```
 
-# Regresor
-```{r regressor}
-fit_data <- select(data,-X)
-fit <- lm(length ~ ., data = fit_data)
+Jako, że dane zostały uporządkowane chronologicznie, długość śledzia w czasie prezentowany jest przy użyciu liczby porządkowej X. Z powodu ilości danych, który znacznie obniża czytelność wykresu, została zastosowana metoda _smooth_, która pozwoli na odkrycie ogólnego wzorca. Użycie wygładzenia liniowego, nie byłoby dostatecznie odpowiednie dla zebranego zestawu danych, dlatego został użyty uogólniony model addytywny _gam_.
 
-summary(fit)$r.squared
+Największa korelacja dotyczy par opisujących planktony, lcop1 i chel1 oraz lcop2 i chel2. Duży współczynnik korelacji pomiędzy cumf oraz totaln, przez co możemy wnioskować, iż wraz ze wzrostem łącznej liczby ryb złowionych w połowie rośnie natężenie połowów. Co więcej możemy zaobreswować korelację pomiędzy cumf oraz fbar - łączne roczne natężenie połowów było wysokie tak samo jak ich intensywność.
+
+# Regresor
+Regresor ma za zadanie przewidzieć rozmiary śledzia w kolejnych połowach.
+Dane zostały podzielone na dwa zbiory: uczący i testowy, z czego 75% całego zbioru zostało potraktowane jako uczące. Uczenie odbyło się przy użyciu metody _Repeated Cross-Validation_, z powodu niewielkich różnic wartości w zbiorze zastosowano liczbę powtórzeń na poziomie 5 z liczbą powtórzen 2. Model jest tworzony w opariu o model klasyfikacyjny _Random Forrest_.
+
+```{r regressor}
+fit <- lm(length ~ ., data = no_x)
 
 # Miara R^2
 summary(fit)$r.squared 
@@ -171,18 +200,17 @@ rmse(fit$residuals)
 
 inTraining <- 
     createDataPartition(
-        y = fit_data$length,
-        p = .75,
+        y = no_x$length,
+        p = 0.75,
         list = FALSE)
 
-training <- fit_data[ inTraining,]
-testing  <- fit_data[-inTraining,]
+training <- no_x[ inTraining,]
+testing  <- no_x[-inTraining,]
 
 ctrl <- trainControl(
     method = "repeatedcv",
     number = 2,
     repeats = 5)
-#plot(ctrl)
 
 fit <- train(length ~ .,
              data = training,
@@ -194,7 +222,7 @@ plot(fit)
 
 rfClasses <- predict(fit, newdata = testing)
 summary(rfClasses)
-
+ 
 df<-data.frame(rfClasses)
 ggplot(df, aes_string(x = rfClasses)) + 
   geom_histogram(bins= 100, fill= "#0087BD")  + 
@@ -205,18 +233,46 @@ ggplot(df, aes_string(x = rfClasses)) +
 
 # Analiza waznosci atrybutów
 ```{r variable-importance}
-fit_RF<-select(data,-X)
-fit_RF <- randomForest(length ~ ., fit_RF)
-print(fit_RF)
-fit_RF
-fit_importance <- importance(fit_RF)
-fit_importance <- data.frame(zmienna = rownames(fit_importance), waznosc = fit_importance[, 1])
-fit_importance$zmienna <- factor(fit_importance$zmienna, levels = fit_importance[order(fit_importance$waznosc), "zmienna"])
+fit_rf <- randomForest(length ~ ., no_x)
+fit_rf
 
-wykres_length_sst <- ggplot(fit_RF, aes(x = length, y = sst)) + 
-  geom_smooth(method = "lm") + 
-  ggtitle("Zaleznosc dlugosci sledzia od temperatury przy powierzchni wody") + 
+importance_df <- importance(fit_rf)
+importance_df <- data.frame(var = rownames(importance_df), importance = importance_df[, 1])
+importance_df$var <- factor(importance_df$var, levels = importance_df[order(importance_df$importance), "var"])
+
+ggplot(importance_df, aes(x = var, y = importance)) +
+  geom_bar(stat = "identity", fill = "#2b8cbe") + 
+  ggtitle("Ważność zmiennych") + 
   theme_bw()
 
-ggplotly(wykres_length_sst)
 ```
+
+```{r len-over-sst}
+ggplot(data, aes(x = length, y = sst)) + 
+  geom_smooth() + 
+  ggtitle("Zależność długości śledzia od temperatury przy powierzchni wody") + 
+  theme_bw()
+```
+
+Jak możemy zaobserwować na powyższym wykresie, długość śledzia maleje wraz ze wzrostem temperatury przy powierzchni wody.
+
+```{r temp-over-time}
+ggplot(data, aes(X, sst)) + 
+  geom_smooth() + 
+  theme_bw() + 
+  ggtitle("Zmiana temperatury wody w czasie") + 
+  labs(x= "Czas - l.porzadkowa", y="Temperatura[°C]")
+```
+
+Natomiast temperatura rosła przez ostatnie lata, co spowodowało znaczne obniżenie długości wyławianych śledzi.
+
+```{r nao-over-time}
+ggplot(data, aes(X, nao)) + 
+  geom_smooth() + 
+  theme_bw() + 
+  ggtitle("Zmiana Oscylacji Północnoatlantyckiej w czasie") + 
+  labs(x= "Czas - l.porzadkowa", y="Oscylacja Północnoatlantycka")
+```
+
+# Podsumowanie
+Konkludując powyższe informacje, możemy postawić diagnozę problemu - w ostatnich latach znacznie wzrosła temperatura przy powierzchni wody, co negatywnie wpłynęło na długość wyławianego śledzia. Wpływ na to ma również zmiana oscylacji północnoatlantyckiej - jest to zjawisko związane z globalną cyrkulacją powietrza i wody oceanicznej, ujawnia się poprzez fluktuacje takich parametrów, jak ciśnienie, temperatura, prędkość wiatru, ilość opadów. 
