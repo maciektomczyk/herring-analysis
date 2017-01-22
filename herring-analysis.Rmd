@@ -1,0 +1,222 @@
+---
+title: "Herring Analysis"
+author: "Maciej Tomczyk"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    highlight: textmate
+    keep_md: yes
+    theme: cosmo
+    toc: yes
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Problem
+Analiza dotyczy zbióru danych na temat połowu śledzia oceanicznego w Europie. Do analizy zebrano pomiary śledzi i warunków w jakich żyją z ostatnich 60 lat. Dane były pobierane z połowów komercyjnych jednostek. W ramach połowu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi.
+
+Poniżej znajdują się szczegółowe opisy konkretnych atrybutów:
+
+| Nazwa kolumny |                     Opis                     |             Dodatkowa Informacja            |
+|:-------------:|:--------------------------------------------:|:-------------------------------------------:|
+|     length    |          długość złowionego śledzia          |                     [cm]                    |
+|     cfin1     |             dostępność planktonu             |  [zagęszczenie Calanus finmarchicus gat. 1] |
+|     cfin2     |             dostępność planktonu             |  [zagęszczenie Calanus finmarchicus gat. 2] |
+|     chel1     |             dostępność planktonu             | [zagęszczenie Calanus helgolandicus gat. 1] |
+|     chel2     |             dostępność planktonu             | [zagęszczenie Calanus helgolandicus gat. 2] |
+|     lcop1     |             dostępność planktonu             |       [zagęszczenie widłonogów gat. 1]      |
+|     lcop2     |             dostępność planktonu             |       [zagęszczenie widłonogów gat. 2]      |
+|      fbar     |         natężenie połowów w regionie         |       [ułamek pozostawionego narybku]       |
+|      recr     |                roczny narybek                |               [liczba śledzi]               |
+|      cumf     |  łączne roczne natężenie połowów w regionie  |       [ułamek pozostawionego narybku]       |
+|     totaln    | łączna liczba ryb złowionych w ramach połowu |               [liczba śledzi]               |
+|      sst      |       temperatura przy powierzchni wody      |                     [°C]                    |
+|      sal      |             poziom zasolenia wody            |                [Knudsen ppt]                |
+|     xmonth    |                miesiąc połowu                |               [numer miesiąca]              |
+|      nao      |         oscylacja północnoatlantycka         |                     [mb]                    |
+
+# Wykorzystane biblioteki
+```{r libraries, warning= FALSE, message= FALSE}
+library(knitr)
+library(ggplot2)
+library(polycor)
+library(heatmaply)
+library(tidyr)
+library(plotly)
+library(VIM)
+library(caret)
+library(klaR)
+library(dplyr)
+```
+
+# Powtwarzalne wyniki
+```{r recurrence-results}
+set.seed(23)
+```
+
+# Operacje na danych
+
+## Wczytanie danych z pliku CSV
+```{r load-data}
+raw_data <- read.csv(file= "sledzie.csv", header= TRUE, sep= ",", na.strings= "?")
+```
+
+## Oczyszczenie danych
+Podstawowe oczyszczenie danych rozpoczynam od zmiany klasy kolumny _xmonth_ z ciągłej na kategoryczną, gdyż w ten sposób powinniśmy traktować miesiąc. Co więcej zaokrąglam wartość totaln, która jest całkowitą liczbą połowu. 
+
+```{r upgrade-data}
+raw_data <- raw_data %>% 
+  mutate(xmonth= as.factor(xmonth), totaln= round(totaln), totaln= as.integer(totaln))
+```
+
+## Problem pustych danych
+```{r missing-values-count}
+apply(raw_data, 2, function(x){sum(is.na(x))})
+
+apply(raw_data, 2, function(x){ sum(is.na(x)) / length(x) })
+```
+
+Cały zbiór danych to prawie 53 tysięcy wieszy, ponad 10 tysięcy z nich posiada brakującą wartość w przynajmniej jednej z kolumn. Usuwając te wierszy, pozbylibyśmy się niemal 20% rekordów, co nawet przy tak dużym zbiorze może być znaczące.
+
+```{r missing-values-graph, warning= FALSE, message= FALSE}
+aggr(raw_data, plot= TRUE, col= c('white', 'black'), numbers= TRUE, prop= FALSE, bars= FALSE, labels= names(raw_data), cex.axis= 0.8, ylab=c("Histogram of missing data","Pattern"))
+```
+
+Jak zobrazowano na wykresie powyżej, rozkład wartości pustych w kolumnach:
+
+* cfin1 - dostępność planktonu -	skupisko Calanus finmarchicus gat. 1
+* cfin2 - dostępność planktonu - skupisko Calanus finmarchicus gat. 2
+* chel1 - dostępność planktonu - skupisko Calanus helgolandicus gat. 1
+* chel2 - dostępność planktonu - skupisko Calanus helgolandicus gat. 2
+* lcop1	- dostępność planktonu - skupisko widłonogów gat. 1
+* lcop2	- dostępność planktonu - skupisko widłonogów gat. 2
+* sst - temperatura przy powierzchni wody	stopnie °C
+
+```{r handle-missing-values}
+data <- raw_data %>% 
+  fill(length:nao) %>% 
+  fill(length:nao, .direction = "up")
+```
+
+Bazując na fakcie, iż dane były zbierane przez 60 lat oraz na tym, iż są one ułożone chronologicznie, nie powinniśmy zastępować wartości pustych średnią czy medianą z całej kolumny. Taka zamiana mogłaby powodować utratę ważnych informacji, dlatego wartości brakujące zostały uzupełnione porzednikiem, bądź następnikiem. Jeśli poprzednik też był wartością pustą, był zastępowany następnikiem.
+
+## Problem duplikatów
+```{r duplicates}
+no_x <- data %>% select(-X)
+sum(duplicated(no_x))
+```
+
+Przyglądając się danym możemy zauważyć sporo duplikatów, po sprawdzeniu na jaw wychodzi ponad 5 tysięcy takich rekordów. Jak zaobserowałem duplikaty pojawiają się najczęściej w jednym połowie, stąd pomysł aby usunąć zbędne informacje.
+
+```{r handle-duplicate-values}
+w_duplicates <- unique(no_x[, 1:15])
+w_duplicates <- w_duplicates %>% mutate(X = seq_len(n())) %>% select(X, everything())
+```
+
+# Statystyki zbioru danych
+## Rozmiar danych
+```{r data-size}
+dim(w_duplicates)
+```
+
+## Podstawowa analiza arybutów
+```{r short-summary}
+str(w_duplicates)
+```
+
+## Analiza arybutów
+```{r full-summary}
+knitr::kable(summary(w_duplicates))
+```
+
+## Rozklad wartosci
+```{r variable-distribution, warning= FALSE, message= FALSE}
+data_dist <- w_duplicates %>% select(-X) %>% melt
+ggplot(data_dist) + 
+  stat_density(aes(x=value, y=..scaled..,color=variable), position="dodge", geom="line")
+```
+
+# Korelacja zmiennych
+```{r correlation}
+heatmaply(hetcor(w_duplicates))
+```
+
+# Wykres po czasie
+```{r interactive-plot}
+p <- ggplot(w_duplicates, aes(x= X, y= length)) +
+  geom_line(alpha= 0.3) +
+  geom_smooth(method= "gam", formula= y ~ s(x, k= 100), size= 1) +
+  ggtitle("Zmiana rozmiaru złowionego śledzia w czasie")
+
+ggplotly(p)
+```
+
+# Regresor
+```{r regressor}
+fit_data <- select(data,-X)
+fit <- lm(length ~ ., data = fit_data)
+
+summary(fit)$r.squared
+
+# Miara R^2
+summary(fit)$r.squared 
+
+# Błąd średnio-kwadratowy
+rmse <- function(num) sqrt(sum(num^2)/length(num))
+rmse(fit$residuals)
+
+inTraining <- 
+    createDataPartition(
+        y = fit_data$length,
+        p = .75,
+        list = FALSE)
+
+training <- fit_data[ inTraining,]
+testing  <- fit_data[-inTraining,]
+
+ctrl <- trainControl(
+    method = "repeatedcv",
+    number = 2,
+    repeats = 5)
+#plot(ctrl)
+
+fit <- train(length ~ .,
+             data = training,
+             method = "rf",
+             trControl = ctrl,
+             ntree = 2)
+fit
+plot(fit)
+
+rfClasses <- predict(fit, newdata = testing)
+summary(rfClasses)
+
+df<-data.frame(rfClasses)
+ggplot(df, aes_string(x = rfClasses)) + 
+  geom_histogram(bins= 100, fill= "#0087BD")  + 
+  ggtitle("Przewidywany rozmiar śledzia") + 
+  theme_bw() + 
+  labs(x= "Rozmiar śledzi", y="Liczba")
+```
+
+# Analiza waznosci atrybutów
+```{r variable-importance}
+fit_RF<-select(data,-X)
+fit_RF <- randomForest(length ~ ., fit_RF)
+print(fit_RF)
+fit_RF
+fit_importance <- importance(fit_RF)
+fit_importance <- data.frame(zmienna = rownames(fit_importance), waznosc = fit_importance[, 1])
+fit_importance$zmienna <- factor(fit_importance$zmienna, levels = fit_importance[order(fit_importance$waznosc), "zmienna"])
+
+wykres_length_sst <- ggplot(fit_RF, aes(x = length, y = sst)) + 
+  geom_smooth(method = "lm") + 
+  ggtitle("Zaleznosc dlugosci sledzia od temperatury przy powierzchni wody") + 
+  theme_bw()
+
+ggplotly(wykres_length_sst)
+```
